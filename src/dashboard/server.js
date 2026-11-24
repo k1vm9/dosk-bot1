@@ -560,111 +560,87 @@ function setupDashboardRoutes(app) {
     }
   });
 
-  // Cookies
+  // Cookies — credentials are never echoed or written before a successful login.
   app.post("/api/cookies", auth, async (req, res) => {
     const raw = req.body?.cookies;
-    if (!raw) return res.json({ ok: false, error: "لا توجد بيانات كوكيز" });
+    if (typeof raw !== "string" && !Array.isArray(raw)) {
+      return res.status(400).json({ ok: false, error: "أدخل الكوكيز بصيغة JSON أو Cookie Header" });
+    }
+
     try {
       let parsed = [];
-      if (typeof raw === "string") {
-        const trimmed = raw.trim();
-        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-          parsed = JSON.parse(trimmed);
-        } else if (trimmed.includes("c_user") && trimmed.includes("xs")) {
-          // Parse cookie header string
-          const parts = trimmed.split(";").map(p => p.trim());
-          for (const p of parts) {
-            const idx = p.indexOf("=");
-            if (idx > 0) {
-              parsed.push({
-                key: p.slice(0, idx).trim(),
-                value: p.slice(idx + 1).trim(),
-                domain: "facebook.com",
-                path: "/"
-              });
-            }
-          }
-        }
-      } else if (Array.isArray(raw)) {
+      if (Array.isArray(raw)) {
         parsed = raw;
-      }
-
-      if (!parsed.length) return res.json({ ok: false, error: "صيغة الكوكيز غير معروفة" });
-      parsed = parsed.map(c => {
-        if (!c || typeof c !== "object") return c;
-        const key = c.key || c.name;
-        return key ? { ...c, key, name: c.name || key } : c;
-      });
-      const hasCUser = parsed.some(c => (c.key === "c_user" || c.name === "c_user") && c.value);
-      const hasXs = parsed.some(c => (c.key === "xs" || c.name === "xs") && c.value);
-      if (!hasCUser || !hasXs) {
-        return res.json({ ok: false, error: "كوكيز ناقصة (c_user أو xs مفقود)" });
-      }
-
-      const cookieCandidates = [
-        path.join(ROOT, "cookies.json"),
-        path.join(ROOT, "artifacts", "api-server", "cookies.json")
-      ];
-      for (const cp of cookieCandidates) {
-        try {
-          fs.mkdirSync(path.dirname(cp), { recursive: true });
-          fs.writeFileSync(cp, JSON.stringify(parsed, null, 2), "utf8");
-        } catch (_) {}
-      }
-
-      // Hot reload in bot if available
-      let reloadResult = null;
-      try {
-        if (typeof global.DoskBot?.reloadCookies === "function") {
-          reloadResult = await global.DoskBot.reloadCookies(parsed);
-        } else if (typeof global.startBot === "function") {
-          reloadResult = await global.startBot({ cookies: parsed, force: true });
-        } else if (typeof global.__doskReloadCookies === "function") {
-          reloadResult = await global.__doskReloadCookies(parsed);
+      } else {
+        const input = raw.trim();
+        if (!input) return res.status(400).json({ ok: false, error: "حقل الكوكيز فارغ" });
+        if (input.startsWith("[")) {
+          parsed = JSON.parse(input);
+          if (!Array.isArray(parsed)) throw new Error("JSON must be an array");
         } else {
-          reloadResult = { ok: false, error: "لا توجد دالة إعادة اتصال متاحة" };
+          parsed = input.replace(/^Cookie:\\s*/i, "").split(";").map(part => {
+            const idx = part.indexOf("=");
+            if (idx <= 0) return null;
+            return { key: part.slice(0, idx).trim(), value: part.slice(idx + 1).trim(), domain: "facebook.com", path: "/" };
+          }).filter(Boolean);
         }
-      } catch (e) {
-        reloadResult = { ok: false, error: e?.message || String(e) };
       }
 
-      // Some runtimes start login asynchronously; poll briefly for actual outcome.
-      const deadline = Date.now() + 25000;
-      while (Date.now() < deadline) {
-        const st = global.DoskBot?.status || (global.DoskBot?.api ? "connected" : "disconnected");
-        const on = st === "connected" && !!(global.DoskBot?.api || global.GoatBot?.fcaApi);
-        if (on) break;
-        if (st === "error" && global.DoskBot?.lastError) break;
-        if (st !== "connecting" && reloadResult && reloadResult.ok === false) break;
-        await new Promise(r => setTimeout(r, 1000));
+      if (!Array.isArray(parsed) || parsed.length < 2 || parsed.length > 100) {
+        return res.status(400).json({ ok: false, error: "عدد الكوكيز غير صالح" });
+      }
+
+      parsed = parsed.map(cookie => {
+        if (!cookie || typeof cookie !== "object" || Array.isArray(cookie)) return null;
+        const key = String(cookie.key || cookie.name || "").trim();
+        const value = cookie.value;
+        if (!/^[A-Za-z0-9_]+$/.test(key) || (typeof value !== "string" && typeof value !== "number") || String(value).length === 0 || String(value).length > 16384) return null;
+        return {
+          ...cookie,
+          key,
+          name: key,
+          value: String(value),
+          domain: typeof cookie.domain === "string" && cookie.domain.includes("facebook.com") ? cookie.domain : "facebook.com",
+          path: typeof cookie.path === "string" && cookie.path.startsWith("/") ? cookie.path : "/"
+        };
+      });
+
+      if (parsed.some(cookie => !cookie)) {
+        return res.status(400).json({ ok: false, error: "بعض عناصر الكوكيز غير صالحة؛ تحقق من صيغة name/value" });
+      }
+      const cUser = parsed.find(cookie => cookie.key === "c_user");
+      const xs = parsed.find(cookie => cookie.key === "xs");
+      if (!cUser || !/^\\d+$/.test(cUser.value) || !xs?.value) {
+        return res.status(400).json({ ok: false, error: "كوكيز تسجيل الدخول ناقصة أو غير صالحة (c_user / xs)" });
+      }
+
+      let result;
+      if (typeof global.DoskBot?.reloadCookies === "function") {
+        result = await global.DoskBot.reloadCookies(parsed);
+      } else if (typeof global.startBot === "function") {
+        result = await global.startBot({ cookies: parsed, force: true });
+      } else if (typeof global.__doskReloadCookies === "function") {
+        result = await global.__doskReloadCookies(parsed);
+      } else {
+        return res.status(503).json({ ok: false, error: "محرك تسجيل الدخول غير متاح" });
       }
 
       const status = global.DoskBot?.status || (global.DoskBot?.api ? "connected" : "disconnected");
-      const online = status === "connected" && !!(global.DoskBot?.api || global.GoatBot?.fcaApi);
-      const stillConnecting = status === "connecting" && !online;
-      const error = reloadResult?.error || global.DoskBot?.lastError || (online || stillConnecting ? null : "فشل الاتصال بالكوكيز");
-      const ok = reloadResult?.ok === true || online;
-
-      if (!stillConnecting) {
-        emitBotStatus({ status: ok ? "connected" : "error", error: ok ? null : error });
-      }
-
-      return res.json({
-        ok: ok || stillConnecting,
-        connecting: stillConnecting,
-        count: parsed.length,
+      const online = status === "connected" && !!global.DoskBot?.api;
+      const ok = result?.ok === true || online;
+      return res.status(ok ? 200 : 422).json({
+        ok,
         online,
-        status: ok ? "connected" : status,
-        userID: global.DoskBot?.userID || global.DoskBot?.botID || null,
-        error: ok || stillConnecting ? null : error,
-        message: ok
-          ? "تم حفظ الكوكيز والاتصال بنجاح"
-          : stillConnecting
-            ? "تم حفظ الكوكيز وجاري محاولة الاتصال..."
-            : (error || "تم حفظ الكوكيز لكن فشل الاتصال"),
+        status,
+        count: parsed.length,
+        userID: ok ? (global.DoskBot?.userID || null) : null,
+        error: ok ? null : (result?.error || global.DoskBot?.lastError || "فشل تسجيل الدخول؛ لم يتم استبدال بيانات الجلسة المحفوظة"),
+        message: ok ? "تم تسجيل الدخول وحفظ الجلسة بنجاح" : "فشل تسجيل الدخول؛ تحقق من صلاحية الكوكيز"
       });
-    } catch (e) {
-      return res.json({ ok: false, error: e.message });
+    } catch (error) {
+      // Never log or return the submitted cookie payload.
+      const message = error instanceof SyntaxError ? "JSON غير صالح؛ تحقق من الأقواس والفواصل" : "تعذر معالجة الكوكيز أو تسجيل الدخول";
+      return res.status(400).json({ ok: false, error: message });
     }
   });
 
