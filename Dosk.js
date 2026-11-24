@@ -63,8 +63,7 @@ loadConfig();
 // Load Cookies
 function loadCookies() {
   const candidates = [
-    path.join(ROOT, "cookies.json"),
-    path.join(ROOT, "artifacts", "api-server", "cookies.json")
+    path.join(ROOT, "cookies.json")
   ];
   for (const c of candidates) {
     if (fs.existsSync(c)) {
@@ -92,10 +91,16 @@ function normalizeAppState(cookies) {
 }
 
 function hasRequiredCookies(cookies) {
-  const arr = Array.isArray(cookies) ? cookies : [];
-  const hasCUser = arr.some(c => (c.key === "c_user" || c.name === "c_user") && c.value);
-  const hasXs = arr.some(c => (c.key === "xs" || c.name === "xs") && c.value);
-  return hasCUser && hasXs;
+  if (!Array.isArray(cookies) || cookies.length < 2 || cookies.length > 100) return false;
+  const valid = cookies.every(c =>
+    c && typeof c === "object" && !Array.isArray(c) &&
+    /^[A-Za-z0-9_]+$/.test(String(c.key || c.name || "")) &&
+    (typeof c.value === "string" || typeof c.value === "number") &&
+    String(c.value).length > 0 && String(c.value).length <= 16384
+  );
+  const cUser = cookies.find(c => (c.key || c.name) === "c_user");
+  const xs = cookies.find(c => (c.key || c.name) === "xs");
+  return valid && !!cUser && /^\\d+$/.test(String(cUser.value)) && !!xs?.value;
 }
 
 function stopCurrentApi() {
@@ -197,6 +202,13 @@ function startBot(options = {}) {
       return { ok: false, error: global.DoskBot.lastError };
     }
 
+    if (!hasRequiredCookies(cookies)) {
+      global.DoskBot.status = "error";
+      global.DoskBot.lastError = "كوكيز غير صالحة (c_user / xs)";
+      emitBotStatus();
+      return { ok: false, error: global.DoskBot.lastError };
+    }
+
     const appState = normalizeAppState(cookies);
     if (!appState.length) {
       stopCurrentApi();
@@ -220,7 +232,7 @@ function startBot(options = {}) {
         resolve(result);
       };
       const timer = setTimeout(() => {
-        if (settled) return;
+        if (settled || seq !== _loginSeq) return;
         stopCurrentApi();
         global.DoskBot.status = "error";
         global.DoskBot.lastError = "انتهت مهلة تسجيل الدخول";
@@ -236,7 +248,7 @@ function startBot(options = {}) {
             appState,
             userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
             logLevel: "silent",
-            forceLogin: true,
+            forceLogin: false,
           },
           (err, api) => {
             clearTimeout(timer);
@@ -272,8 +284,10 @@ function startBot(options = {}) {
               try {
                 const refreshed = typeof api.getAppState === "function" ? api.getAppState() : null;
                 if (Array.isArray(refreshed) && refreshed.length) {
-                  fs.writeFileSync(path.join(ROOT, "cookies.json"), JSON.stringify(refreshed, null, 2), "utf8");
-                  try { fs.writeFileSync(path.join(ROOT, "artifacts", "api-server", "cookies.json"), JSON.stringify(refreshed, null, 2), "utf8"); } catch (_) {}
+                  const cookiePath = path.join(ROOT, "cookies.json");
+                  const tempPath = cookiePath + "." + process.pid + ".tmp";
+                  fs.writeFileSync(tempPath, JSON.stringify(refreshed, null, 2), { encoding: "utf8", mode: 0o600 });
+                  fs.renameSync(tempPath, cookiePath);
                 }
               } catch (_) {}
 
@@ -346,11 +360,8 @@ global.startBot = startBot;
 global.DoskBot.startBot = startBot;
 global.DoskBot.reloadCookies = async (newCookies) => {
   const cookies = Array.isArray(newCookies) ? newCookies : loadCookies();
-  if (Array.isArray(newCookies) && newCookies.length) {
-    const p = path.join(ROOT, "cookies.json");
-    fs.writeFileSync(p, JSON.stringify(newCookies, null, 2), "utf8");
-    try { fs.writeFileSync(path.join(ROOT, "artifacts", "api-server", "cookies.json"), JSON.stringify(newCookies, null, 2), "utf8"); } catch (_) {}
-  }
+  if (!hasRequiredCookies(cookies)) return { ok: false, error: "كوكيز غير صالحة (c_user / xs)" };
+  // startBot persists refreshed appState only after Facebook accepts the login.
   return await startBot({ cookies, force: true });
 };
 global.DoskBot.getStatus = () => ({
