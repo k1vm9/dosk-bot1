@@ -407,10 +407,24 @@ textarea.code { font-family: 'SF Mono', Consolas, monospace; font-size: 12px; li
 }
 .bn-item.active { color: var(--accent); }
 
+#pane-cookies .card { min-width: 0; }
+#cookiesInput {
+  display: block; width: 100%; max-width: 100%; min-height: 220px;
+  resize: vertical; direction: ltr; text-align: left; white-space: pre-wrap;
+  overflow-wrap: anywhere; word-break: break-word; tab-size: 2;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+}
+#pane-cookies .card-header { flex-wrap: wrap; gap: 10px; }
+#pane-cookies .card-header .btn { flex: 0 0 auto; }
 @media (max-width: 768px) {
   .bottom-nav { display: flex; }
   .messenger-wrap { flex-direction: column; height: calc(100vh - 200px); }
   .msg-sidebar { width: 100%; height: 200px; border-left: none; border-bottom: 1px solid var(--border); }
+  #pane-cookies .card { padding: 14px; border-radius: 16px; }
+  #pane-cookies .card-header { align-items: stretch; }
+  #pane-cookies .card-header .btn { width: 100%; min-height: 44px; }
+  #cookiesInput { min-height: 42vh; max-height: 60vh; font-size: 11px; line-height: 1.55; padding: 12px; }
+  #pane-cookies p { font-size: 12px !important; line-height: 1.7; overflow-wrap: anywhere; }
 }
 </style>
 </head>
@@ -1393,15 +1407,9 @@ async function openThreadInfoModal() {
 async function loadCookiesView() {
   const inp = document.getElementById("cookiesInput");
   const st = document.getElementById("cookiesStatus");
-  inp.value = "جاري قراءة الكوكيز...";
-  try {
-    const res = await api("/api/files/read?path=cookies.json");
-    inp.value = res.content || "";
-    st.textContent = "✓ تم تحميل الكوكيز الحالية";
-  } catch (_) {
-    inp.value = "";
-    st.textContent = "ملف الكوكيز فارغ أو غير موجود";
-  }
+  // Session values stay server-side; never fetch or render them into the page.
+  if (!inp.value.trim()) inp.value = "";
+  st.textContent = "🔒 الجلسة المحفوظة تبقى على الخادم ولا يتم عرض قيمها هنا.";
 }
 
 async function saveCookies() {
@@ -1413,11 +1421,13 @@ async function saveCookies() {
     const res = await api("/api/cookies", { method: "POST", body: { cookies: raw } });
     if (res.ok && !res.connecting) {
       toast(res.message || `تم حفظ ${res.count} كوكي وإعادة الاتصال بنجاح ✓`, "ok");
+      document.getElementById("cookiesInput").value = "";
       st.textContent = `✓ متصل${res.userID ? ` (ID: ${res.userID})` : ""} - ${res.count || 0} كوكيز`;
       refreshStats();
     } else if (res.connecting) {
-      toast(res.message || "تم حفظ الكوكيز وجاري الاتصال...", "ok");
-      st.textContent = "⏳ تم حفظ الكوكيز وجاري محاولة الاتصال...";
+      toast(res.message || "تم تسجيل الدخول؛ جارٍ تحديث الحالة...", "ok");
+      document.getElementById("cookiesInput").value = "";
+      st.textContent = "⏳ تم قبول محاولة الدخول؛ جارٍ تحديث الحالة...";
       refreshStats();
     } else {
       const err = res.error || res.message || "فشل حفظ الكوكيز";
